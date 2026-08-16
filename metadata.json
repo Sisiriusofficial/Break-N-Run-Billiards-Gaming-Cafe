@@ -1,0 +1,6 @@
+{
+  "name": "GameHub Cafe & Billiards Manager",
+  "description": "All-in-one management web app for gaming internet cafes and billiard lounges with live station timers, hardware-specific game catalogs, snack POS, queue waitlist, and shift revenue reports.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
