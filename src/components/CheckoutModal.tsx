@@ -1,25 +1,8 @@
-import React, { useState } from 'react';
-import {
-  X,
-  Receipt,
-  Banknote,
-  Smartphone,
-  Flame,
-  Sliders,
-  Printer,
-  CheckCircle2,
-  Copy,
-  Check,
-} from 'lucide-react';
+import React, { useEffect, useMemo, useState } from 'react';
+import { Banknote, Check, CheckCircle2, Copy, Flame, Percent, Printer, Receipt, Smartphone, Sliders, X } from 'lucide-react';
 import { CompletedBill, PaymentMethod, Station } from '../types';
 import { useCafe } from '../context/CafeContext';
-import {
-  computeSessionState,
-  formatCurrency,
-  formatDateTime,
-  formatMinutes,
-  formatTimeOnly,
-} from '../utils/formatters';
+import { computeSessionState, formatCurrency, formatDateTime, formatMinutes, formatTimeOnly } from '../utils/formatters';
 
 interface CheckoutModalProps {
   station: Station | null;
@@ -27,37 +10,100 @@ interface CheckoutModalProps {
 }
 
 export const CheckoutModal: React.FC<CheckoutModalProps> = ({ station, onClose }) => {
-  const { settings, currentTime, completeAndCheckoutSession } = useCafe();
-
+  const { settings, currentTime, completeAndCheckoutSession, updateSessionDiscount } = useCafe();
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('cash');
-  const [cashReceived, setCashReceived] = useState<string>('');
-  const [customMethodName, setCustomMethodName] = useState<string>('Card / POS');
-  const [trxId, setTrxId] = useState<string>('');
-  const [senderNumber, setSenderNumber] = useState<string>('');
-  const [checkoutNotes, setCheckoutNotes] = useState<string>('');
+  const [cashReceived, setCashReceived] = useState('');
+  const [customMethodName, setCustomMethodName] = useState('Card / POS');
+  const [trxId, setTrxId] = useState('');
+  const [senderNumber, setSenderNumber] = useState('');
+  const [checkoutNotes, setCheckoutNotes] = useState('');
+  const [discountType, setDiscountType] = useState<'fixed' | 'percentage'>('fixed');
+  const [discountInput, setDiscountInput] = useState('');
   const [completedReceipt, setCompletedReceipt] = useState<CompletedBill | null>(null);
   const [copied, setCopied] = useState(false);
+
+  useEffect(() => {
+    if (!station?.currentSession) return;
+    setDiscountType(station.currentSession.discountType || 'fixed');
+    setDiscountInput(station.currentSession.discountAmount ? String(station.currentSession.discountAmount) : '');
+  }, [station?.id, station?.currentSession?.id]);
 
   if (!station || (!station.currentSession && !completedReceipt)) return null;
 
   const session = station.currentSession;
-  const state = session
-    ? computeSessionState(session, station.hourlyRate, settings, currentTime)
-    : null;
-
-  const grandTotal = completedReceipt ? completedReceipt.totalAmount : state?.grandTotal || 0;
-  const cashNum = parseFloat(cashReceived) || 0;
+  const state = session ? computeSessionState(session, station.hourlyRate, settings, currentTime) : null;
+  const grandTotal = completedReceipt?.totalAmount ?? state?.grandTotal ?? 0;
+  const cashNum = Number.parseFloat(cashReceived) || 0;
   const cashChange = Math.max(0, cashNum - grandTotal);
 
-  const handleQuickCash = (amount: number) => {
-    setCashReceived(amount.toString());
+  const paymentLabel = useMemo(() => {
+    if (!completedReceipt) return paymentMethod === 'custom' ? customMethodName : paymentMethod;
+    switch (completedReceipt.paymentMethod) {
+      case 'bkash': return `bKash${completedReceipt.trxId ? ` • ${completedReceipt.trxId}` : ''}`;
+      case 'nagad': return `Nagad${completedReceipt.trxId ? ` • ${completedReceipt.trxId}` : ''}`;
+      case 'custom': return completedReceipt.customPaymentName || 'Custom';
+      default: return 'Cash';
+    }
+  }, [completedReceipt, paymentMethod, customMethodName]);
+
+  const applyDiscount = (value: string, type: 'fixed' | 'percentage' = discountType) => {
+    const parsed = Number.parseFloat(value);
+    const safe = Number.isFinite(parsed) ? Math.max(0, parsed) : 0;
+    const clamped = type === 'percentage' ? Math.min(100, safe) : Math.min(state?.subtotal ?? safe, safe);
+    setDiscountInput(clamped ? String(clamped) : '');
+    if (session) updateSessionDiscount(station.id, clamped, type);
+  };
+
+  const handleDiscountType = (type: 'fixed' | 'percentage') => {
+    setDiscountType(type);
+    applyDiscount(discountInput, type);
+  };
+
+  const getReceiptText = (bill: CompletedBill) => {
+    const lines = [
+      '================================',
+      settings.cafeName.toUpperCase(),
+      settings.cafeTagline,
+      `Tel: ${settings.phoneOrContact}`,
+      '================================',
+      `Receipt: ${bill.receiptNumber}`,
+      `Date: ${formatDateTime(bill.createdAt)}`,
+      `Station: ${bill.stationName}`,
+      `Customer: ${bill.customerName}`,
+      '--------------------------------',
+      `Gaming ${formatMinutes(bill.durationMinutes)} @ ${formatCurrency(bill.hourlyRate, settings.currencySymbol)}/hr` ,
+      `Gaming charge              ${formatCurrency(bill.gamingTimeCost, settings.currencySymbol)}`,
+    ];
+    if (bill.extraControllersCost) lines.push(`Extra controllers           ${formatCurrency(bill.extraControllersCost, settings.currencySymbol)}`);
+    bill.orders.forEach((item) => lines.push(`${item.name} x${item.quantity}             ${formatCurrency(item.price * item.quantity, settings.currencySymbol)}`));
+    lines.push('--------------------------------');
+    if (bill.discountAmount > 0) lines.push(`Discount                   -${formatCurrency(bill.discountAmount, settings.currencySymbol)}`);
+    if (bill.taxAmount > 0) lines.push(`Tax                         ${formatCurrency(bill.taxAmount, settings.currencySymbol)}`);
+    lines.push(`TOTAL                       ${formatCurrency(bill.totalAmount, settings.currencySymbol)}`);
+    lines.push(`Payment: ${paymentLabel}`);
+    if (bill.paymentMethod === 'cash' && bill.cashReceived !== undefined) {
+      lines.push(`Cash received              ${formatCurrency(bill.cashReceived, settings.currencySymbol)}`);
+      lines.push(`Change                     ${formatCurrency(bill.cashChange || 0, settings.currencySymbol)}`);
+    }
+    lines.push('================================', settings.receiptFooterMessage, '================================');
+    return lines.join('\n');
+  };
+
+  const printReceipt = (bill: CompletedBill) => {
+    const popup = window.open('', '_blank', 'width=420,height=760');
+    if (!popup) return;
+    const rows = bill.orders.map((item) => `<div class="row"><span>${item.name} ×${item.quantity}</span><span>${formatCurrency(item.price * item.quantity, settings.currencySymbol)}</span></div>`).join('');
+    popup.document.write(`<!doctype html><html><head><title>${bill.receiptNumber}</title><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{margin:0;background:#fff;color:#111;font-family:Arial,sans-serif}.receipt{width:72mm;margin:0 auto;padding:8mm 4mm;box-sizing:border-box;font-size:12px}.center{text-align:center}.brand{font-size:18px;font-weight:800}.muted{color:#555}.line{border-top:1px dashed #888;margin:10px 0}.row{display:flex;justify-content:space-between;gap:10px;margin:5px 0}.total{font-size:17px;font-weight:800}.discount{color:#16803c}@media print{body{width:80mm}.receipt{width:80mm;margin:0;padding:4mm}.no-print{display:none}}</style></head><body><div class="receipt"><div class="center brand">${settings.cafeName}</div><div class="center muted">${settings.cafeTagline}</div><div class="center muted">${settings.phoneOrContact}</div><div class="line"></div><div>Receipt: <b>${bill.receiptNumber}</b></div><div>Date: ${formatDateTime(bill.createdAt)}</div><div>Station: ${bill.stationName}</div><div>Customer: ${bill.customerName}</div><div class="line"></div><div class="row"><span>Gaming ${formatMinutes(bill.durationMinutes)}</span><span>${formatCurrency(bill.gamingTimeCost, settings.currencySymbol)}</span></div>${rows}<div class="line"></div>${bill.discountAmount > 0 ? `<div class="row discount"><span>Discount</span><span>-${formatCurrency(bill.discountAmount, settings.currencySymbol)}</span></div>` : ''}${bill.taxAmount > 0 ? `<div class="row"><span>Tax</span><span>${formatCurrency(bill.taxAmount, settings.currencySymbol)}</span></div>` : ''}<div class="row total"><span>TOTAL</span><span>${formatCurrency(bill.totalAmount, settings.currencySymbol)}</span></div><div class="row"><span>Payment</span><span>${paymentLabel}</span></div>${bill.paymentMethod === 'cash' && bill.cashReceived !== undefined ? `<div class="row"><span>Received</span><span>${formatCurrency(bill.cashReceived, settings.currencySymbol)}</span></div><div class="row"><span>Change</span><span>${formatCurrency(bill.cashChange || 0, settings.currencySymbol)}</span></div>` : ''}<div class="line"></div><div class="center muted">${settings.receiptFooterMessage}</div></div><script>window.onload=()=>{window.print();window.onafterprint=()=>window.close()}</script></body></html>`);
+    popup.document.close();
   };
 
   const handleFinishCheckout = () => {
+    if (!session || !state) return;
+    if (paymentMethod === 'cash' && cashNum < grandTotal) return;
     const bill = completeAndCheckoutSession(
       station.id,
       paymentMethod,
-      paymentMethod === 'cash' ? cashNum || grandTotal : undefined,
+      paymentMethod === 'cash' ? cashNum : undefined,
       checkoutNotes,
       {
         customPaymentName: paymentMethod === 'custom' ? customMethodName.trim() || 'Custom' : undefined,
@@ -65,592 +111,89 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({ station, onClose }
         senderNumber: senderNumber.trim() || undefined,
       }
     );
-    if (bill) {
-      setCompletedReceipt(bill);
-    }
+    if (bill) setCompletedReceipt(bill);
   };
 
-  const handlePrint = () => {
-    window.print();
-  };
-
-  const formatPaymentLabel = (bill: CompletedBill) => {
-    switch (bill.paymentMethod) {
-      case 'bkash':
-        return `bKash${bill.trxId ? ` (TrxID: ${bill.trxId})` : ''}${bill.senderNumber ? ` [${bill.senderNumber}]` : ''}`;
-      case 'nagad':
-        return `Nagad${bill.trxId ? ` (TrxID: ${bill.trxId})` : ''}${bill.senderNumber ? ` [${bill.senderNumber}]` : ''}`;
-      case 'custom':
-        return `${bill.customPaymentName || 'Custom'}${bill.trxId ? ` (Ref: ${bill.trxId})` : ''}`;
-      case 'cash':
-      default:
-        return 'Cash';
-    }
-  };
-
-  const getReceiptText = (bill: CompletedBill) => {
-    const lines = [
-      `==============================`,
-      `   ${settings.cafeName.toUpperCase()}`,
-      `   ${settings.cafeTagline}`,
-      `   Tel: ${settings.phoneOrContact}`,
-      `==============================`,
-      `Receipt: ${bill.receiptNumber}`,
-      `Date: ${formatDateTime(bill.createdAt)}`,
-      `Station: ${bill.stationName}`,
-      `Customer: ${bill.customerName}`,
-      `------------------------------`,
-      `Gaming Time: ${formatMinutes(bill.durationMinutes)} @ ${formatCurrency(bill.hourlyRate, settings.currencySymbol)}/hr`,
-      `  = ${formatCurrency(bill.gamingTimeCost, settings.currencySymbol)}`,
-    ];
-
-    if (bill.extraControllersCost > 0) {
-      lines.push(`Extra Controllers: ${formatCurrency(bill.extraControllersCost, settings.currencySymbol)}`);
-    }
-
-    if (bill.orders.length > 0) {
-      lines.push(`------------------------------`);
-      lines.push(`CONCESSIONS & SNACKS:`);
-      bill.orders.forEach((o) => {
-        lines.push(`  ${o.name} x${o.quantity}  ${formatCurrency(o.price * o.quantity, settings.currencySymbol)}`);
-      });
-    }
-
-    if (bill.discountAmount > 0) {
-      lines.push(`------------------------------`);
-      lines.push(`Discount Applied: -${formatCurrency(bill.discountAmount, settings.currencySymbol)}`);
-    }
-
-    if (bill.taxAmount > 0) {
-      lines.push(`Tax (${settings.taxRatePercent}%): ${formatCurrency(bill.taxAmount, settings.currencySymbol)}`);
-    }
-
-    lines.push(`==============================`);
-    lines.push(`TOTAL DUE: ${formatCurrency(bill.totalAmount, settings.currencySymbol)}`);
-    lines.push(`Payment Method: ${formatPaymentLabel(bill)}`);
-
-    if (bill.paymentMethod === 'cash' && bill.cashReceived) {
-      lines.push(`Cash Tendered: ${formatCurrency(bill.cashReceived, settings.currencySymbol)}`);
-      lines.push(`Change Returned: ${formatCurrency(bill.cashChange || 0, settings.currencySymbol)}`);
-    }
-
-    lines.push(`==============================`);
-    lines.push(`${settings.receiptFooterMessage}`);
-    lines.push(`==============================`);
-
-    return lines.join('\n');
-  };
-
-  const handleCopyReceipt = () => {
+  const copyReceipt = () => {
     if (!completedReceipt) return;
-    const text = getReceiptText(completedReceipt);
-    navigator.clipboard.writeText(text).then(() => {
+    navigator.clipboard.writeText(getReceiptText(completedReceipt)).then(() => {
       setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
+      window.setTimeout(() => setCopied(false), 1800);
     });
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-zinc-950/85 backdrop-blur-md overflow-y-auto animate-in fade-in duration-200">
-      <div className="bg-zinc-900 border border-zinc-800 rounded-2xl w-full max-w-xl overflow-hidden shadow-2xl shadow-black/80 my-8">
-        
-        {/* Header */}
-        <div className="px-6 py-4 border-b border-zinc-800/80 flex items-center justify-between bg-zinc-900/95">
-          <div className="flex items-center gap-2.5">
-            <div className="p-2 rounded-xl bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 shadow-[0_0_10px_rgba(16,185,129,0.15)]">
-              <Receipt className="w-5 h-5" />
-            </div>
-            <div>
-              <h2 className="text-base font-bold text-white tracking-tight">
-                {completedReceipt ? 'Receipt Generated' : `Checkout: ${station.name}`}
-              </h2>
-              <p className="text-xs text-zinc-400 font-mono">
-                {completedReceipt
-                  ? `Receipt #${completedReceipt.receiptNumber} • Paid in full`
-                  : `Customer: ${session?.customerName || 'Guest'}`}
-              </p>
-            </div>
-          </div>
-          <button
-            id="close-checkout-modal-btn"
-            onClick={onClose}
-            className="p-1.5 rounded-xl text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/80 transition-colors"
-          >
-            <X className="w-5 h-5" />
-          </button>
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-5 bg-zinc-950/85 backdrop-blur-md overflow-y-auto">
+      <div className="bg-zinc-900 border border-zinc-800 rounded-2xl w-full max-w-5xl overflow-hidden shadow-2xl shadow-black/80 my-4">
+        <div className="px-5 sm:px-6 py-4 border-b border-zinc-800 flex items-center justify-between">
+          <div className="flex items-center gap-3"><div className="p-2 rounded-xl bg-emerald-500/10 text-emerald-400"><Receipt className="w-5 h-5" /></div><div><h2 className="text-lg font-bold text-white">{completedReceipt ? 'Payment Complete' : 'Checkout'}</h2><p className="text-xs text-zinc-500 font-mono">{completedReceipt ? `Receipt #${completedReceipt.receiptNumber}` : `${station.name} • ${session?.customerName || 'Guest'}`}</p></div></div>
+          <button onClick={onClose} className="p-2 rounded-xl text-zinc-400 hover:text-white hover:bg-zinc-800"><X className="w-5 h-5" /></button>
         </div>
 
-        {/* Normal Checkout Flow */}
         {!completedReceipt && session && state && (
-          <div className="p-6 space-y-5">
-            
-            {/* Itemized Breakdown Card */}
-            <div className="p-4 rounded-xl bg-zinc-950/90 border border-zinc-800 space-y-3 shadow-xs">
-              <div className="flex items-center justify-between text-xs pb-2 border-b border-zinc-800">
-                <span className="text-zinc-400">Station & Customer</span>
-                <span className="font-bold text-white">
-                  {station.name} ({session.customerName})
-                </span>
+          <div className="grid lg:grid-cols-[1.15fr_.85fr] gap-0">
+            <div className="p-5 sm:p-6 space-y-5 lg:border-r border-zinc-800">
+              <div className="rounded-2xl bg-zinc-950 border border-zinc-800 p-4">
+                <div className="flex items-start justify-between gap-4"><div><p className="text-xs text-zinc-500">SESSION</p><h3 className="text-base font-bold text-white mt-1">{station.name}</h3><p className="text-xs text-zinc-400 mt-1">{session.customerName} • Started {formatTimeOnly(session.startTime)}</p></div><span className="px-2.5 py-1 rounded-full text-[10px] font-bold bg-emerald-500/10 text-emerald-300 border border-emerald-500/20">ACTIVE</span></div>
               </div>
 
-              {/* Time Item */}
-              <div className="flex items-center justify-between text-xs">
-                <div>
-                  <span className="font-semibold text-zinc-200 block">Gaming Rental Time</span>
-                  <span className="text-[11px] text-zinc-400 font-mono">
-                    {formatTimeOnly(session.startTime)} - {formatTimeOnly(currentTime)} ({formatMinutes(state.elapsedMinutes)}) @ {formatCurrency(station.hourlyRate, settings.currencySymbol)}/hr
-                  </span>
+              <div className="rounded-2xl bg-zinc-950 border border-zinc-800 overflow-hidden">
+                <div className="px-4 py-3 border-b border-zinc-800 flex justify-between"><span className="text-xs font-bold text-zinc-300">ORDER SUMMARY</span><span className="text-xs text-zinc-500">{formatMinutes(state.elapsedMinutes)}</span></div>
+                <div className="p-4 space-y-3 text-sm">
+                  <div className="flex justify-between"><span className="text-zinc-300">Gaming session</span><span className="font-mono">{formatCurrency(state.gamingTimeCost, settings.currencySymbol)}</span></div>
+                  {state.extraControllersCost > 0 && <div className="flex justify-between"><span className="text-zinc-400">Extra controllers</span><span className="font-mono">{formatCurrency(state.extraControllersCost, settings.currencySymbol)}</span></div>}
+                  {session.orders.map((item) => <div key={item.id} className="flex justify-between"><span className="text-zinc-400">{item.name} ×{item.quantity}</span><span className="font-mono">{formatCurrency(item.price * item.quantity, settings.currencySymbol)}</span></div>)}
+                  <div className="pt-3 border-t border-zinc-800 flex justify-between text-xs text-zinc-500"><span>Subtotal</span><span className="font-mono">{formatCurrency(state.subtotal, settings.currencySymbol)}</span></div>
                 </div>
-                <span className="font-mono font-bold text-white">
-                  {formatCurrency(state.gamingTimeCost, settings.currencySymbol)}
-                </span>
               </div>
 
-              {/* Extra Controllers if any */}
-              {state.extraControllersCost > 0 && (
-                <div className="flex items-center justify-between text-xs">
-                  <span className="text-zinc-300">
-                    +{session.extraControllersCount} Extra Controller(s) Rental
-                  </span>
-                  <span className="font-mono font-bold text-white">
-                    {formatCurrency(state.extraControllersCost, settings.currencySymbol)}
-                  </span>
-                </div>
-              )}
-
-              {/* Concessions List */}
-              {session.orders.map((o) => (
-                <div key={o.id} className="flex items-center justify-between text-xs">
-                  <span className="text-zinc-300">
-                    {o.name} x{o.quantity}
-                  </span>
-                  <span className="font-mono font-bold text-amber-400">
-                    {formatCurrency(o.price * o.quantity, settings.currencySymbol)}
-                  </span>
-                </div>
-              ))}
-
-              {/* Discounts */}
-              {state.discountValue > 0 && (
-                <div className="flex items-center justify-between text-xs text-emerald-400">
-                  <span>Discount Applied</span>
-                  <span className="font-mono font-bold">
-                    -{formatCurrency(state.discountValue, settings.currencySymbol)}
-                  </span>
-                </div>
-              )}
-
-              {/* Tax */}
-              {state.taxValue > 0 && (
-                <div className="flex items-center justify-between text-xs text-zinc-400">
-                  <span>Tax ({settings.taxRatePercent}%)</span>
-                  <span className="font-mono font-bold">
-                    {formatCurrency(state.taxValue, settings.currencySymbol)}
-                  </span>
-                </div>
-              )}
-
-              {/* Total Due Big Row */}
-              <div className="pt-3 border-t border-zinc-800 flex items-center justify-between">
-                <span className="text-sm font-bold text-white uppercase tracking-wider">
-                  Total Balance Due
-                </span>
-                <span className="text-2xl font-black text-emerald-400 font-mono">
-                  {formatCurrency(state.grandTotal, settings.currencySymbol)}
-                </span>
+              <div className="rounded-2xl bg-zinc-950 border border-zinc-800 p-4 space-y-3">
+                <div className="flex items-center justify-between"><div><p className="text-xs font-bold text-zinc-200">DISCOUNT</p><p className="text-[11px] text-zinc-500">Apply a fixed amount or percentage.</p></div><Percent className="w-4 h-4 text-emerald-400" /></div>
+                <div className="grid grid-cols-2 gap-2"><button onClick={() => handleDiscountType('fixed')} className={`py-2 rounded-xl text-xs font-semibold border ${discountType === 'fixed' ? 'bg-emerald-500 text-zinc-950 border-emerald-400' : 'bg-zinc-900 text-zinc-400 border-zinc-800'}`}>Amount ({settings.currencySymbol})</button><button onClick={() => handleDiscountType('percentage')} className={`py-2 rounded-xl text-xs font-semibold border ${discountType === 'percentage' ? 'bg-emerald-500 text-zinc-950 border-emerald-400' : 'bg-zinc-900 text-zinc-400 border-zinc-800'}`}>Percentage (%)</button></div>
+                <div className="flex gap-2"><input value={discountInput} onChange={(e) => applyDiscount(e.target.value)} type="number" min="0" max={discountType === 'percentage' ? 100 : state.subtotal} step="0.01" placeholder={discountType === 'percentage' ? '10' : '50'} className="flex-1 px-3 py-2.5 rounded-xl bg-zinc-900 border border-zinc-700 text-white font-mono focus:outline-none focus:border-emerald-500" /><button onClick={() => applyDiscount('0')} className="px-4 rounded-xl bg-zinc-800 border border-zinc-700 text-zinc-300 hover:bg-zinc-700">Clear</button></div>
+                {state.discountValue > 0 && <div className="flex justify-between text-xs text-emerald-400"><span>Discount applied</span><span className="font-mono">-{formatCurrency(state.discountValue, settings.currencySymbol)}</span></div>}
               </div>
+
+              <div className="rounded-2xl bg-zinc-950 border border-zinc-800 p-4 space-y-3">
+                <p className="text-xs font-bold text-zinc-200">PAYMENT METHOD</p>
+                <div className="grid grid-cols-4 gap-2">
+                  {([
+                    ['cash', 'Cash', Banknote], ['bkash', 'bKash', Smartphone], ['nagad', 'Nagad', Flame], ['custom', 'Custom', Sliders],
+                  ] as const).map(([id, label, Icon]) => <button key={id} onClick={() => setPaymentMethod(id)} className={`p-2.5 rounded-xl border text-xs font-semibold flex flex-col items-center gap-1.5 ${paymentMethod === id ? 'bg-emerald-500 text-zinc-950 border-emerald-400' : 'bg-zinc-900 text-zinc-400 border-zinc-800 hover:border-zinc-700'}`}><Icon className="w-4 h-4" /><span>{label}</span></button>)}
+                </div>
+
+                {paymentMethod === 'cash' && <div className="space-y-2 pt-1"><div className="flex gap-1.5 flex-wrap">{[Math.ceil(grandTotal), 50, 100, 500, 1000].filter((v, i, a) => v > 0 && a.indexOf(v) === i).map((note) => <button key={note} onClick={() => setCashReceived(String(note))} className="px-2.5 py-1 rounded-lg bg-zinc-800 text-emerald-300 text-[10px] font-mono">{formatCurrency(note, settings.currencySymbol)}</button>)}</div><div className="grid grid-cols-2 gap-2"><input value={cashReceived} onChange={(e) => setCashReceived(e.target.value)} type="number" min="0" placeholder="Cash received" className="px-3 py-2.5 rounded-xl bg-zinc-900 border border-zinc-700 text-white font-mono focus:outline-none focus:border-emerald-500" /><div className="px-3 py-2.5 rounded-xl bg-zinc-900 border border-zinc-800"><p className="text-[10px] text-zinc-500">CHANGE</p><p className={`font-mono font-bold ${cashChange >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{formatCurrency(cashChange, settings.currencySymbol)}</p></div></div>{cashNum < grandTotal && cashReceived && <p className="text-[11px] text-red-400">Cash received is less than the total.</p>}</div>}
+                {paymentMethod === 'bkash' && <div className="grid sm:grid-cols-2 gap-2"><input value={trxId} onChange={(e) => setTrxId(e.target.value)} placeholder="bKash TrxID" className="px-3 py-2 rounded-xl bg-zinc-900 border border-pink-500/30 text-white text-xs" /><input value={senderNumber} onChange={(e) => setSenderNumber(e.target.value)} placeholder="Sender phone (optional)" className="px-3 py-2 rounded-xl bg-zinc-900 border border-pink-500/30 text-white text-xs" /></div>}
+                {paymentMethod === 'nagad' && <div className="grid sm:grid-cols-2 gap-2"><input value={trxId} onChange={(e) => setTrxId(e.target.value)} placeholder="Nagad TrxID" className="px-3 py-2 rounded-xl bg-zinc-900 border border-orange-500/30 text-white text-xs" /><input value={senderNumber} onChange={(e) => setSenderNumber(e.target.value)} placeholder="Sender phone (optional)" className="px-3 py-2 rounded-xl bg-zinc-900 border border-orange-500/30 text-white text-xs" /></div>}
+                {paymentMethod === 'custom' && <div className="grid sm:grid-cols-2 gap-2"><input value={customMethodName} onChange={(e) => setCustomMethodName(e.target.value)} placeholder="Payment method" className="px-3 py-2 rounded-xl bg-zinc-900 border border-cyan-500/30 text-white text-xs" /><input value={trxId} onChange={(e) => setTrxId(e.target.value)} placeholder="Reference (optional)" className="px-3 py-2 rounded-xl bg-zinc-900 border border-cyan-500/30 text-white text-xs" /></div>}
+              </div>
+
+              <textarea value={checkoutNotes} onChange={(e) => setCheckoutNotes(e.target.value)} placeholder="Checkout note (optional)" rows={2} className="w-full px-3 py-2.5 rounded-xl bg-zinc-950 border border-zinc-800 text-white text-xs resize-none focus:outline-none focus:border-zinc-600" />
             </div>
 
-            {/* Payment Method Selector (Cash - Bkash - Nagad - Custom) */}
-            <div className="space-y-2">
-              <label className="block text-xs font-semibold text-zinc-300">
-                Select Payment Method
-              </label>
-              <div className="grid grid-cols-4 gap-2">
-                {[
-                  {
-                    id: 'cash',
-                    label: 'Cash',
-                    icon: Banknote,
-                    activeClass: 'bg-emerald-500 text-zinc-950 border-emerald-400 shadow-[0_0_12px_rgba(16,185,129,0.35)]',
-                  },
-                  {
-                    id: 'bkash',
-                    label: 'bKash',
-                    icon: Smartphone,
-                    activeClass: 'bg-[#E2136E] text-white border-pink-400 shadow-[0_0_12px_rgba(226,19,110,0.35)]',
-                  },
-                  {
-                    id: 'nagad',
-                    label: 'Nagad',
-                    icon: Flame,
-                    activeClass: 'bg-[#F7941D] text-zinc-950 border-orange-400 shadow-[0_0_12px_rgba(247,148,29,0.35)]',
-                  },
-                  {
-                    id: 'custom',
-                    label: 'Custom',
-                    icon: Sliders,
-                    activeClass: 'bg-cyan-500 text-zinc-950 border-cyan-400 shadow-[0_0_12px_rgba(6,182,212,0.35)]',
-                  },
-                ].map((m) => {
-                  const Icon = m.icon;
-                  const isSelected = paymentMethod === m.id;
-                  return (
-                    <button
-                      key={m.id}
-                      type="button"
-                      id={`pay-method-${m.id}`}
-                      onClick={() => setPaymentMethod(m.id as PaymentMethod)}
-                      className={`p-2.5 rounded-xl border text-xs font-semibold flex flex-col items-center justify-center gap-1.5 transition-all active:scale-[0.98] ${
-                        isSelected
-                          ? `${m.activeClass} font-bold`
-                          : 'bg-zinc-950 text-zinc-300 border-zinc-800 hover:bg-zinc-800/80 hover:border-zinc-700'
-                      }`}
-                    >
-                      <Icon className="w-4 h-4" />
-                      <span>{m.label}</span>
-                    </button>
-                  );
-                })}
+            <aside className="p-5 sm:p-6 bg-zinc-950/40 space-y-4">
+              <div className="flex items-center justify-between"><h3 className="font-bold text-white">Payment Summary</h3><span className="text-[10px] px-2 py-1 rounded-full bg-zinc-800 text-zinc-400">Receipt preview</span></div>
+              <div className="rounded-xl bg-white text-zinc-900 p-5 font-mono text-xs shadow-xl" id="receipt-preview">
+                <div className="text-center pb-3 border-b border-dashed border-zinc-300"><p className="text-lg font-black uppercase">{settings.cafeName}</p><p className="text-[10px] text-zinc-500">{settings.cafeTagline}</p><p className="text-[10px] text-zinc-500">{settings.phoneOrContact}</p></div>
+                <div className="py-3 space-y-1 text-[10px]"><div className="flex justify-between"><span>Station</span><b>{station.name}</b></div><div className="flex justify-between"><span>Customer</span><b>{session.customerName}</b></div><div className="flex justify-between"><span>Receipt</span><b>Generated after payment</b></div></div>
+                <div className="border-t border-dashed border-zinc-300 py-3 space-y-1.5"><div className="flex justify-between"><span>Gaming</span><span>{formatCurrency(state.gamingTimeCost, settings.currencySymbol)}</span></div>{session.orders.map((item) => <div key={item.id} className="flex justify-between"><span>{item.name} ×{item.quantity}</span><span>{formatCurrency(item.price * item.quantity, settings.currencySymbol)}</span></div>)}{state.discountValue > 0 && <div className="flex justify-between text-emerald-700"><span>Discount</span><span>-{formatCurrency(state.discountValue, settings.currencySymbol)}</span></div>}{state.taxValue > 0 && <div className="flex justify-between"><span>Tax</span><span>{formatCurrency(state.taxValue, settings.currencySymbol)}</span></div>}</div>
+                <div className="border-t border-zinc-900 mt-2 pt-3 flex justify-between text-base font-black"><span>TOTAL</span><span>{formatCurrency(grandTotal, settings.currencySymbol)}</span></div>
+                <div className="mt-3 pt-3 border-t border-dashed border-zinc-300 text-center text-[10px] text-zinc-500">{settings.receiptFooterMessage}</div>
               </div>
-            </div>
-
-            {/* Cash Calculator Box */}
-            {paymentMethod === 'cash' && (
-              <div className="p-4 rounded-xl bg-zinc-950/90 border border-zinc-800 space-y-3 shadow-xs">
-                <div className="flex items-center justify-between">
-                  <span className="text-xs font-semibold text-zinc-300">Cash Received Tender</span>
-                  <div className="flex items-center gap-1.5 flex-wrap">
-                    <button
-                      type="button"
-                      onClick={() => handleQuickCash(Math.ceil(state.grandTotal))}
-                      className="px-2 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-[10px] font-mono transition-colors"
-                    >
-                      Exact
-                    </button>
-                    {[50, 100, 500, 1000].map((note) => (
-                      <button
-                        key={note}
-                        type="button"
-                        onClick={() => handleQuickCash(note)}
-                        className="px-2 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-emerald-400 text-[10px] font-mono font-bold transition-colors"
-                      >
-                        {formatCurrency(note, settings.currencySymbol)}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-2 gap-3 items-center">
-                  <div>
-                    <input
-                      id="cash-received-input"
-                      type="number"
-                      min="0"
-                      step="0.5"
-                      value={cashReceived}
-                      onChange={(e) => setCashReceived(e.target.value)}
-                      placeholder="Amount received..."
-                      className="w-full px-3 py-2 text-sm rounded-xl bg-zinc-900 border border-zinc-700 text-white font-mono font-bold focus:outline-none focus:border-emerald-500"
-                    />
-                  </div>
-                  <div className="p-2.5 rounded-xl bg-zinc-900 border border-zinc-800 flex items-center justify-between">
-                    <span className="text-xs text-zinc-400">Change Due:</span>
-                    <span className={`text-base font-mono font-bold ${cashChange > 0 ? 'text-amber-400' : 'text-zinc-400'}`}>
-                      {formatCurrency(cashChange, settings.currencySymbol)}
-                    </span>
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {/* bKash Payment Box */}
-            {paymentMethod === 'bkash' && (
-              <div className="p-4 rounded-xl bg-[#E2136E]/10 border border-[#E2136E]/30 space-y-3 shadow-xs">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <Smartphone className="w-4 h-4 text-[#E2136E]" />
-                    <span className="text-xs font-bold text-pink-300">bKash Mobile Payment</span>
-                  </div>
-                  <span className="text-[11px] font-mono text-pink-400">Merchant / Personal</span>
-                </div>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                  <div>
-                    <label className="block text-[10px] font-semibold text-pink-200 mb-1">
-                      Transaction ID (TrxID)
-                    </label>
-                    <input
-                      type="text"
-                      value={trxId}
-                      onChange={(e) => setTrxId(e.target.value)}
-                      placeholder="e.g. 9J8A7K3X"
-                      className="w-full px-3 py-1.5 text-xs rounded-lg bg-zinc-950 border border-pink-500/30 text-white font-mono uppercase focus:outline-none focus:border-pink-400"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-[10px] font-semibold text-pink-200 mb-1">
-                      Customer / Sender Phone (Optional)
-                    </label>
-                    <input
-                      type="text"
-                      value={senderNumber}
-                      onChange={(e) => setSenderNumber(e.target.value)}
-                      placeholder="e.g. 017XXXXXXXX"
-                      className="w-full px-3 py-1.5 text-xs rounded-lg bg-zinc-950 border border-pink-500/30 text-white font-mono focus:outline-none focus:border-pink-400"
-                    />
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {/* Nagad Payment Box */}
-            {paymentMethod === 'nagad' && (
-              <div className="p-4 rounded-xl bg-[#F7941D]/10 border border-[#F7941D]/30 space-y-3 shadow-xs">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <Flame className="w-4 h-4 text-[#F7941D]" />
-                    <span className="text-xs font-bold text-orange-300">Nagad Mobile Payment</span>
-                  </div>
-                  <span className="text-[11px] font-mono text-orange-400">Post Office Digital</span>
-                </div>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                  <div>
-                    <label className="block text-[10px] font-semibold text-orange-200 mb-1">
-                      Transaction ID (TrxID)
-                    </label>
-                    <input
-                      type="text"
-                      value={trxId}
-                      onChange={(e) => setTrxId(e.target.value)}
-                      placeholder="e.g. NAG98213"
-                      className="w-full px-3 py-1.5 text-xs rounded-lg bg-zinc-950 border border-orange-500/30 text-white font-mono uppercase focus:outline-none focus:border-orange-400"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-[10px] font-semibold text-orange-200 mb-1">
-                      Customer / Sender Phone (Optional)
-                    </label>
-                    <input
-                      type="text"
-                      value={senderNumber}
-                      onChange={(e) => setSenderNumber(e.target.value)}
-                      placeholder="e.g. 018XXXXXXXX"
-                      className="w-full px-3 py-1.5 text-xs rounded-lg bg-zinc-950 border border-orange-500/30 text-white font-mono focus:outline-none focus:border-orange-400"
-                    />
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {/* Custom Payment Box */}
-            {paymentMethod === 'custom' && (
-              <div className="p-4 rounded-xl bg-cyan-500/10 border border-cyan-500/30 space-y-3 shadow-xs">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <Sliders className="w-4 h-4 text-cyan-400" />
-                    <span className="text-xs font-bold text-cyan-300">Custom Payment Method</span>
-                  </div>
-                  <div className="flex items-center gap-1">
-                    {['Card / POS', 'Bank', 'Voucher', 'Due / Credit'].map((preset) => (
-                      <button
-                        key={preset}
-                        type="button"
-                        onClick={() => setCustomMethodName(preset)}
-                        className="px-2 py-0.5 text-[10px] rounded bg-zinc-900 hover:bg-zinc-800 text-cyan-300 border border-cyan-500/20 transition-colors"
-                      >
-                        {preset}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                  <div>
-                    <label className="block text-[10px] font-semibold text-cyan-200 mb-1">
-                      Payment Method Name
-                    </label>
-                    <input
-                      type="text"
-                      value={customMethodName}
-                      onChange={(e) => setCustomMethodName(e.target.value)}
-                      placeholder="e.g. Credit Card, Voucher, Bank Transfer"
-                      className="w-full px-3 py-1.5 text-xs rounded-lg bg-zinc-950 border border-cyan-500/30 text-white focus:outline-none focus:border-cyan-400"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-[10px] font-semibold text-cyan-200 mb-1">
-                      Auth / Voucher / Reference Code (Optional)
-                    </label>
-                    <input
-                      type="text"
-                      value={trxId}
-                      onChange={(e) => setTrxId(e.target.value)}
-                      placeholder="e.g. AUTH-4819"
-                      className="w-full px-3 py-1.5 text-xs rounded-lg bg-zinc-950 border border-cyan-500/30 text-white font-mono focus:outline-none focus:border-cyan-400"
-                    />
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {/* Checkout Action Button */}
-            <div className="pt-2">
-              <button
-                id="complete-checkout-btn"
-                onClick={handleFinishCheckout}
-                className="w-full py-3.5 px-4 rounded-xl font-bold text-sm bg-gradient-to-r from-emerald-500 via-teal-400 to-cyan-400 hover:from-emerald-400 hover:to-cyan-300 text-zinc-950 shadow-[0_0_20px_rgba(20,184,166,0.3)] flex items-center justify-center gap-2 active:scale-[0.99] transition-all"
-              >
-                <CheckCircle2 className="w-5 h-5" />
-                <span>Confirm Payment & Print Receipt</span>
-              </button>
-            </div>
-
+              <div className="rounded-2xl border border-zinc-800 bg-zinc-900/70 p-4"><div className="flex justify-between text-sm text-zinc-400"><span>Subtotal</span><span className="font-mono">{formatCurrency(state.subtotal, settings.currencySymbol)}</span></div><div className="flex justify-between text-sm text-emerald-400 mt-2"><span>Discount</span><span className="font-mono">-{formatCurrency(state.discountValue, settings.currencySymbol)}</span></div><div className="flex justify-between text-2xl font-black text-white mt-4 pt-4 border-t border-zinc-800"><span>Total</span><span className="text-emerald-400 font-mono">{formatCurrency(grandTotal, settings.currencySymbol)}</span></div></div>
+              <button onClick={handleFinishCheckout} disabled={paymentMethod === 'cash' && cashNum < grandTotal} className="w-full py-3.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 disabled:opacity-40 disabled:cursor-not-allowed text-zinc-950 font-black flex items-center justify-center gap-2 shadow-[0_0_20px_rgba(16,185,129,0.25)]"><CheckCircle2 className="w-5 h-5" /> Complete Payment</button>
+              <p className="text-[10px] text-zinc-600 text-center">Completing payment ends the session and frees the station.</p>
+            </aside>
           </div>
         )}
 
-        {/* Completed Receipt View */}
         {completedReceipt && (
-          <div className="p-6 space-y-5">
-            {/* Printable Thermal Receipt Card */}
-            <div
-              id="printable-receipt"
-              className="p-5 rounded-xl bg-white text-zinc-900 font-mono text-xs shadow-inner space-y-3"
-            >
-              <div className="text-center border-b border-dashed border-zinc-300 pb-3">
-                <h3 className="text-base font-black tracking-tight uppercase">
-                  {settings.cafeName}
-                </h3>
-                <p className="text-[10px] text-zinc-600">{settings.cafeTagline}</p>
-                <p className="text-[10px] text-zinc-600">Tel: {settings.phoneOrContact}</p>
-                <div className="mt-2 text-[10px] text-zinc-500">
-                  <span>Rec: {completedReceipt.receiptNumber}</span> •{' '}
-                  <span>{formatDateTime(completedReceipt.createdAt)}</span>
-                </div>
-              </div>
-
-              <div className="space-y-1 text-[11px] border-b border-dashed border-zinc-300 pb-2">
-                <div className="flex justify-between">
-                  <span>Station:</span>
-                  <span className="font-bold">{completedReceipt.stationName}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span>Customer / Payer:</span>
-                  <span className="font-bold">{completedReceipt.customerName}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span>Duration:</span>
-                  <span>{formatMinutes(completedReceipt.durationMinutes)} (@ {formatCurrency(completedReceipt.hourlyRate, settings.currencySymbol)}/hr)</span>
-                </div>
-                {completedReceipt.billiardMatch && (
-                  <div className="pt-1 text-[10px] text-zinc-700">
-                    <span className="font-bold block text-zinc-900">Billiards Match:</span>
-                    <span>
-                      {completedReceipt.billiardMatch.player1Name} ({completedReceipt.billiardMatch.player1Score}) vs{' '}
-                      {completedReceipt.billiardMatch.player2Name} ({completedReceipt.billiardMatch.player2Score})
-                      {completedReceipt.billiardMatch.winner &&
-                        ` • Winner: ${
-                          completedReceipt.billiardMatch.winner === 'player1'
-                            ? completedReceipt.billiardMatch.player1Name
-                            : completedReceipt.billiardMatch.player2Name
-                        }`}
-                    </span>
-                  </div>
-                )}
-              </div>
-
-              {/* Items */}
-              <div className="space-y-1.5 border-b border-dashed border-zinc-300 pb-3">
-                <div className="flex justify-between font-bold">
-                  <span>Gaming Rental</span>
-                  <span>{formatCurrency(completedReceipt.gamingTimeCost, settings.currencySymbol)}</span>
-                </div>
-
-                {completedReceipt.extraControllersCost > 0 && (
-                  <div className="flex justify-between text-zinc-700">
-                    <span>Extra Controllers</span>
-                    <span>{formatCurrency(completedReceipt.extraControllersCost, settings.currencySymbol)}</span>
-                  </div>
-                )}
-
-                {completedReceipt.orders.map((o) => (
-                  <div key={o.id} className="flex justify-between text-zinc-700">
-                    <span>{o.name} x{o.quantity}</span>
-                    <span>{formatCurrency(o.price * o.quantity, settings.currencySymbol)}</span>
-                  </div>
-                ))}
-
-                {completedReceipt.discountAmount > 0 && (
-                  <div className="flex justify-between text-emerald-700 font-semibold">
-                    <span>Discount</span>
-                    <span>-{formatCurrency(completedReceipt.discountAmount, settings.currencySymbol)}</span>
-                  </div>
-                )}
-              </div>
-
-              {/* Total Row */}
-              <div className="space-y-1 pt-1">
-                <div className="flex justify-between text-base font-black">
-                  <span>TOTAL PAID</span>
-                  <span>{formatCurrency(completedReceipt.totalAmount, settings.currencySymbol)}</span>
-                </div>
-                <div className="flex justify-between text-[10px] text-zinc-600">
-                  <span>Payment Method:</span>
-                  <span className="font-bold uppercase">{formatPaymentLabel(completedReceipt)}</span>
-                </div>
-                {completedReceipt.paymentMethod === 'cash' && completedReceipt.cashReceived && (
-                  <>
-                    <div className="flex justify-between text-[10px] text-zinc-600">
-                      <span>Cash Tendered:</span>
-                      <span>{formatCurrency(completedReceipt.cashReceived, settings.currencySymbol)}</span>
-                    </div>
-                    <div className="flex justify-between text-[10px] text-zinc-600">
-                      <span>Change:</span>
-                      <span>{formatCurrency(completedReceipt.cashChange || 0, settings.currencySymbol)}</span>
-                    </div>
-                  </>
-                )}
-              </div>
-
-              <div className="text-center pt-3 border-t border-dashed border-zinc-300 text-[10px] text-zinc-500 italic">
-                {settings.receiptFooterMessage}
-              </div>
-            </div>
-
-            {/* Action Buttons */}
-            <div className="flex items-center justify-between gap-3">
-              <button
-                id="copy-receipt-btn"
-                onClick={handleCopyReceipt}
-                className="py-2.5 px-4 rounded-xl text-xs font-semibold bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 flex items-center gap-1.5 transition-colors"
-              >
-                {copied ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
-                <span>{copied ? 'Copied Receipt!' : 'Copy Receipt Text'}</span>
-              </button>
-
-              <div className="flex items-center gap-2">
-                <button
-                  id="print-receipt-btn"
-                  onClick={handlePrint}
-                  className="py-2.5 px-4 rounded-xl text-xs font-semibold bg-zinc-800 hover:bg-zinc-700 text-cyan-300 border border-zinc-700 flex items-center gap-1.5 transition-colors"
-                >
-                  <Printer className="w-4 h-4" />
-                  <span>Print Receipt</span>
-                </button>
-
-                <button
-                  id="done-checkout-btn"
-                  onClick={onClose}
-                  className="py-2.5 px-6 rounded-xl font-bold text-xs bg-emerald-500 hover:bg-emerald-400 text-zinc-950 shadow-[0_0_15px_rgba(16,185,129,0.3)] transition-all"
-                >
-                  Done
-                </button>
-              </div>
-            </div>
-
+          <div className="grid lg:grid-cols-[1fr_1fr] gap-0">
+            <div className="p-5 sm:p-6 border-r border-zinc-800 space-y-4"><div className="rounded-2xl bg-emerald-500/10 border border-emerald-500/20 p-4"><div className="flex items-center gap-2 text-emerald-300"><CheckCircle2 className="w-5 h-5" /><span className="font-bold">Payment recorded successfully</span></div><p className="text-xs text-zinc-400 mt-2">Receipt #{completedReceipt.receiptNumber} • {paymentLabel}</p></div><div className="grid grid-cols-2 gap-3"><button onClick={() => printReceipt(completedReceipt)} className="py-3 rounded-xl bg-emerald-500 text-zinc-950 font-bold flex items-center justify-center gap-2"><Printer className="w-4 h-4" /> Print Receipt</button><button onClick={copyReceipt} className="py-3 rounded-xl bg-zinc-800 text-zinc-200 border border-zinc-700 font-semibold flex items-center justify-center gap-2">{copied ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />} {copied ? 'Copied' : 'Copy Text'}</button></div><button onClick={onClose} className="w-full py-3 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 font-semibold">Done</button></div>
+            <div className="p-5 sm:p-6 bg-zinc-950/40"><div className="bg-white text-zinc-900 rounded-xl p-5 font-mono text-xs shadow-xl"><div className="text-center pb-3 border-b border-dashed border-zinc-300"><p className="text-lg font-black uppercase">{settings.cafeName}</p><p>{settings.cafeTagline}</p><p>{settings.phoneOrContact}</p></div><div className="py-3 space-y-1"><p>Receipt: <b>{completedReceipt.receiptNumber}</b></p><p>Date: {formatDateTime(completedReceipt.createdAt)}</p><p>Station: {completedReceipt.stationName}</p><p>Customer: {completedReceipt.customerName}</p></div><div className="border-t border-dashed border-zinc-300 py-3 space-y-1.5"><div className="flex justify-between"><span>Gaming</span><span>{formatCurrency(completedReceipt.gamingTimeCost, settings.currencySymbol)}</span></div>{completedReceipt.orders.map((item) => <div key={item.id} className="flex justify-between"><span>{item.name} ×{item.quantity}</span><span>{formatCurrency(item.price * item.quantity, settings.currencySymbol)}</span></div>)}{completedReceipt.discountAmount > 0 && <div className="flex justify-between text-emerald-700"><span>Discount</span><span>-{formatCurrency(completedReceipt.discountAmount, settings.currencySymbol)}</span></div>}{completedReceipt.taxAmount > 0 && <div className="flex justify-between"><span>Tax</span><span>{formatCurrency(completedReceipt.taxAmount, settings.currencySymbol)}</span></div>}</div><div className="border-t border-zinc-900 mt-2 pt-3 flex justify-between text-base font-black"><span>TOTAL PAID</span><span>{formatCurrency(completedReceipt.totalAmount, settings.currencySymbol)}</span></div><p className="mt-3 pt-3 border-t border-dashed border-zinc-300 text-center text-[10px] text-zinc-500">{settings.receiptFooterMessage}</p></div></div>
           </div>
         )}
-
       </div>
     </div>
   );
 };
-
